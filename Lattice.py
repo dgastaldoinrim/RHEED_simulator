@@ -1,10 +1,13 @@
 import numpy as np
 import pymatgen as mg
 import numpy.ma as ma
+from scipy import linalg
+import warnings
+import copy
 import Errors
 
 class Lattice():
-    def __init__(self, space_group, lattice_parameters, elements, coordinates):
+    def __init__(self, space_group, lattice_parameters, elements, coordinates,miller_indexes,reconstruction):
         self._define_parameters_(space_group, lattice_parameters)
         self._define_elements_(elements)
         self._define_coordinates_(coordinates)
@@ -13,6 +16,8 @@ class Lattice():
         self.Bmat = ma.masked_less_equal(ma.masked_equal(self.lattice.reciprocal_lattice.matrix,-0.).filled(0.),10 ** (-15)).filled(0.)
         self.crystal = mg.Structure.from_spacegroup(self.space_group,self.lattice,self.elements,self.coordinates)
         self._define_base_(self.crystal.sites)
+        self.kvec = np.dot(np.array(miller_indexes),self.Bmat)
+        self._get_hkl_oriented_lattice_(self.kvec)
 
     def _define_parameters_(self, space_group, parameters):
         try:
@@ -135,4 +140,68 @@ class Lattice():
         base = {}
         for site in sites:
             base[sites.index(site)] = {'Element': site.species.elements[0], 'Coordinates': ma.masked_less_equal(site.coords,10 ** (-15)).filled(0.)}
-        self.base = base 
+        self.base = base
+
+    def _get_hkl_oriented_lattice_(self,kvec):
+        if np.all(np.cross(kvec, np.array([0., 0., 1.])) == np.array([0., 0., 0.])):
+            self.rotation_matrix = np.eye(3)
+            self.rotAmat = self.Amat
+            self.rotBmat = self.Bmat
+            self.rotbase = self.base
+        else:
+            warnings.simplefilter("ignore")
+            theta = - np.arctan(kvec[1] / kvec[0])
+            phi = - np.arctan(np.sqrt(kvec[0] ** 2 + kvec[1] ** 2) / kvec[2])
+            rthetaz = ma.masked_inside(ma.masked_equal(np.array([[np.cos(theta), -np.sin(theta), 0.],[np.sin(theta), np.cos(theta), 0.],[0., 0., 1.]]),-0.).filled(0.),-10 ** (-15),10 ** (-15)).filled(0.)
+            rphiy = ma.masked_inside(ma.masked_equal(np.array([[np.cos(phi), 0., np.sin(phi)],[0., 1., 0.],[-np.sin(phi), 0., np.cos(phi)]]),-0.).filled(0.),-10 ** (-15),10 ** (-15)).filled(0.)
+            matrix = np.dot(rphiy, rthetaz)
+            rotkvec = ma.masked_inside(np.dot(matrix,kvec),-10 ** (-15),10 ** (-15)).filled(0.)
+            Amattoreduce = np.dot(self.Amat, matrix)
+            Ap, Al, Au = linalg.lu(Amattoreduce)
+            Bmattoreduce = np.dot(self.Bmat, matrix)
+            Bp, Bl, Bu = linalg.lu(Bmattoreduce)
+            if np.all(np.cross(rotkvec, np.array([0., 0., 1.])) == np.array([0., 0., 0.])):
+                self.rotation_matrix = matrix
+                self.rotAmat = self._correct_u_matrices_(Au)
+                self.rotBmat = self._correct_u_matrices_(Bu)
+                self.rotbase = self._get_hkl_oriented_base_(matrix,self.base)
+
+    def _correct_u_matrices_(self, matrix):
+        corrected_matrix = []
+        for row in matrix:
+            if (row[0] < 0. or (row[0] == 0. and row[1] < 0.) or (row[0] == 0. and row[1] == 0. and row[2] < 0.)):
+                corrected_matrix.append(ma.masked_equal(-row,-0.).filled(0.))
+            else:
+                corrected_matrix.append(row)
+        return np.array(corrected_matrix)
+
+    def _get_hkl_oriented_base_(self, rotation_matrix, base):
+        rotated_base = copy.deepcopy(base)
+        for key in base:
+            vector = ma.masked_inside(np.dot(rotation_matrix,base[key]["Coordinates"]),-10 ** (-15),10 ** (-15)).filled(0.)
+            rotated_base[key]["Coordinates"] = self._check_base_coordinates_(vector)
+        return rotated_base
+
+    def _check_base_coordinates_(self, vector):
+        if vector[0] < 0:
+            vector = vector + self.rotAmat[0]
+            self._check_base_coordinates_(vector)
+        elif vector[0] > self.rotAmat[0,0]:
+            vector = vector - self.rotAmat[0]
+            self._check_base_coordinates_(vector)
+        if vector[1] < 0:
+            vector = vector + self.rotAmat[1]
+            self._check_base_coordinates_(vector)
+        elif vector[1] > self.rotAmat[1,1]:
+            vector = vector - self.rotAmat[1]
+            self._check_base_coordinates_(vector)
+        if vector[2] < 0:
+            vector = vector + self.rotAmat[2]
+            self._check_base_coordinates_(vector)
+        elif vector[2] > self.rotAmat[2,2]:
+            vector = vector - self.rotAmat[2]
+            self._check_base_coordinates_(vector)
+        if (vector >= 0.).all() and (vector <= np.array([self.rotAmat[0,0],self.rotAmat[1,1],self.rotAmat[2,2]])).all():
+            return np.array(vector)
+        else:
+            self._check_base_coordinates_(vector)
