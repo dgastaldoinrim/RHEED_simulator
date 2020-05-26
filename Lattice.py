@@ -18,6 +18,8 @@ class Lattice():
         self._define_base_(self.crystal.sites)
         self.kvec = np.dot(np.array(miller_indexes),self.Bmat)
         self._get_hkl_oriented_lattice_(self.kvec)
+        self.reconstruction_string = reconstruction
+        self._get_surface_(self.Amat, self.reconstruction_string)
 
     def _define_parameters_(self, space_group, parameters):
         try:
@@ -205,3 +207,15 @@ class Lattice():
             return np.array(vector)
         else:
             self._check_base_coordinates_(vector)
+
+    def _get_surface_(self, lattice, reconstruction):
+        string_split = reconstruction.split('-')
+        theta = float(string_split[2][1:])
+        periodicities = string_split[1].split('X')
+        p1, p2 = tuple([float(periodicities[0]),float(periodicities[1])])
+        if string_split[0] == 'p':
+            self.Woodsmatrix = ma.masked_inside(np.array([[np.cos(theta), - np.sin(theta)],[np.sin(theta), np.cos(theta)]]) * np.array([[p1, 0.],[0.,p2]]) * np.eye(2),-10 ** (-15),10 ** (-15)).filled(0.)
+        else:
+            self.Woodsmatrix = ma.masked_inside(np.array([[np.cos(theta), - np.sin(theta)],[np.sin(theta), np.cos(theta)]]) * np.array([[p1, 0.],[0.,p2]]) * np.array([[1., 0.],[0.5, 0.5]]),-10 ** (-15),10 ** (-15)).filled(0.)
+        self.surfAmat = ma.masked_inside(self.Woodsmatrix * np.dot(np.array([[1., 0., 0.],[0., 1., 0.]]),np.dot(self.Amat, np.array([[1., 0.],[0., 1.],[0., 0.]]))),-10 ** (-15),10 ** (-15)).filled(0.)
+        self.surfBmat = ma.masked_inside(2 * np.pi * np.transpose(linalg.inv(self.surfAmat)),-10 ** (-15),10 ** (-15)).filled(0.)
